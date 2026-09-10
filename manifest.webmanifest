@@ -1,0 +1,13 @@
+{
+  "name": "Manifest — Provizas",
+  "short_name": "Manifest",
+  "description": "Document intake for Xero — bills, invoices, and expenses.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F7F7FB",
+  "theme_color": "#28285F",
+  "icons": [
+    { "src": "/assets/symbol.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
