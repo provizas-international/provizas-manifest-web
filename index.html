@@ -371,6 +371,12 @@
     type: 'bill',
     files: [],
     draft: null,
+    // Set when extraction finds more than one receipt in the uploaded
+    // image(s) — an array of {draft, status, message}. state.draft still
+    // points at whichever one is being reviewed full-screen; batch stays
+    // the source of truth for the list view and bulk submit.
+    batch: null,
+    focusedBatchIndex: null,
     submitter: null,
     contacts: [],
     contactsSyncedAt: null,
@@ -662,31 +668,220 @@
   // ---------- extraction ----------
   el('extractBtn').addEventListener('click', extractDraft);
 
+  // Pre-select the most likely Xero contact rather than leaving the user to
+  // find it themselves: try a fuzzy match on whatever name was extracted
+  // first (handles punctuation/spacing differences like "PT. Umbra Prasia"
+  // vs "PT UMBRA PRASIA"); for generic expenses (petrol, small cash
+  // purchases) with no confident match, fall back to the shared "General
+  // Provider" catch-all instead of leaving an unmatched name the user would
+  // just have to fix by hand.
+  function guessAndSetContact(d){
+    const guess = guessContactByName(d.contact_name);
+    if(guess){
+      d.contact_name = guess.name;
+      d.contact_id = guess.id;
+    } else if(d.record_type === 'expense' && hasGeneralProvider()){
+      d.contact_name = GENERAL_PROVIDER_NAME;
+      d.contact_id = findContactByName(GENERAL_PROVIDER_NAME)?.id || null;
+    }
+  }
+
   async function extractDraft(){
     setMain(loadingHTML('Reading document…'));
     try{
-      const {draft} = await api('https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/extract', {
+      const {draft, drafts} = await api('https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/extract', {
         method:'POST',
         body: JSON.stringify({ recordType: state.type, files: state.files })
       });
-      state.draft = draft;
-      // Pre-select the most likely Xero contact rather than leaving the
-      // user to find it themselves: try a fuzzy match on whatever name was
-      // extracted first (handles punctuation/spacing differences like
-      // "PT. Umbra Prasia" vs "PT UMBRA PRASIA"); for generic expenses
-      // (petrol, small cash purchases) with no confident match, fall back
-      // to the shared "General Provider" catch-all instead of leaving an
-      // unmatched name the user would just have to fix by hand.
-      const guess = guessContactByName(state.draft.contact_name);
-      if(guess){
-        state.draft.contact_name = guess.name;
-      } else if(state.draft.record_type === 'expense' && hasGeneralProvider()){
-        state.draft.contact_name = GENERAL_PROVIDER_NAME;
+      if(Array.isArray(drafts) && drafts.length > 1){
+        drafts.forEach(guessAndSetContact);
+        state.batch = drafts.map(d => ({draft: d, status: 'ready', message: ''}));
+        state.focusedBatchIndex = null;
+        state.draft = null;
+        renderBatchList();
+        return;
       }
+      state.batch = null;
+      state.focusedBatchIndex = null;
+      state.draft = draft;
+      guessAndSetContact(state.draft);
       renderDraft();
     }catch(err){
       setMain(errorHTML('Could not read this document', err.message));
     }
+  }
+
+  // ---------- batch review (multiple receipts in one image) ----------
+  function calcTotalFor(d){
+    return d.line_items.reduce((s,li)=>s + (Number(li.quantity)||0)*(Number(li.unit_amount)||0), 0);
+  }
+  function batchItemMissing(d){
+    const missing = [];
+    if(!state.submitter) missing.push('submitter');
+    if(!d.contact_id) missing.push('contact');
+    if(d.record_type === 'expense' && !d.bank_account_id) missing.push('bank account');
+    return missing;
+  }
+
+  function renderBatchList(){
+    const readyCount = state.batch.filter(it => it.status === 'ready' && batchItemMissing(it.draft).length === 0).length;
+    setMain(`
+      <div class="draft-wrap">
+      <div class="manifest">
+        <div class="manifest-footer" style="border-bottom:1px solid var(--border,#e2e2ea);margin-bottom:0;">
+          <div class="footer-meta"><strong>${state.batch.length} receipts found</strong> — review each, then submit the ones you want sent.</div>
+        </div>
+        <div id="batchRows"></div>
+        <div class="manifest-footer">
+          <div class="footer-meta" id="batchSummary">${readyCount} of ${state.batch.length} ready to submit</div>
+          <div class="actions">
+            <button class="btn reject" id="batchDiscardAll">Discard all</button>
+            <button class="btn approve" id="batchSubmitBtn">Submit selected</button>
+          </div>
+        </div>
+      </div>
+      </div>
+    `);
+    renderBatchRows();
+    el('batchSubmitBtn').addEventListener('click', submitSelectedBatch);
+    el('batchDiscardAll').addEventListener('click', ()=>{
+      state.batch = null; state.focusedBatchIndex = null; state.files = [];
+      renderFileList();
+      el('extractBtn').disabled = true;
+      setMain(`<div class="empty-state"><div class="glyph">▭</div><div class="lead">Discarded</div><div class="fine">Upload another document to start a new draft</div></div>`);
+    });
+  }
+
+  function renderBatchRows(){
+    const wrap = el('batchRows');
+    if(!wrap) return;
+    wrap.innerHTML = state.batch.map((item,i)=>{
+      const d = item.draft;
+      const missing = batchItemMissing(d);
+      const total = calcTotalFor(d);
+      const statusBadge = item.status === 'sent' ? `<span class="pill sent">sent</span>`
+        : item.status === 'sending' ? `<span class="pill" style="background:var(--status-yellow-bg);color:var(--status-yellow-fg);">sending…</span>`
+        : item.status === 'error' ? `<span class="pill failed" title="${escAttr(item.message||'')}">failed</span>`
+        : missing.length ? `<span class="pill failed" title="Still need: ${escAttr(missing.join(', '))}">needs review</span>`
+        : '';
+      const checkDisabled = item.status === 'sent' || item.status === 'sending';
+      return `
+        <div class="batch-row" data-idx="${i}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border,#e2e2ea);">
+          <input type="checkbox" class="batch-check" data-idx="${i}" ${item.checked!==false ? 'checked' : ''} ${checkDisabled?'disabled':''}>
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:700;">${escHtml(d.contact_name || '(no contact)')}</div>
+            <div style="font-size:12.5px;color:var(--text-label);">${escHtml(d.document_date||'')} · ${escHtml(d.currency)} ${fmt(total)}</div>
+          </div>
+          ${statusBadge}
+          <button class="btn" data-review="${i}" ${item.status==='sending'?'disabled':''}>Review</button>
+        </div>
+      `;
+    }).join('');
+    wrap.querySelectorAll('[data-review]').forEach(btn=>{
+      btn.addEventListener('click', ()=>openBatchItem(+btn.dataset.review));
+    });
+    wrap.querySelectorAll('.batch-check').forEach(cb=>{
+      cb.addEventListener('change', ()=>{ state.batch[+cb.dataset.idx].checked = cb.checked; });
+    });
+  }
+
+  function openBatchItem(i){
+    state.focusedBatchIndex = i;
+    state.draft = state.batch[i].draft; // same object reference — edits in the detail screen write straight back into the batch
+    renderDraft();
+  }
+
+  function backToBatch(){
+    state.focusedBatchIndex = null;
+    state.draft = null;
+    renderBatchList();
+  }
+
+  async function submitSelectedBatch(){
+    const indices = state.batch
+      .map((item,i)=>({item,i}))
+      .filter(({item}) => item.checked !== false && item.status !== 'sent' && item.status !== 'sending')
+      .map(({i})=>i);
+    if(!indices.length) return;
+
+    el('batchSubmitBtn').disabled = true;
+    el('batchSubmitBtn').textContent = 'Submitting…';
+
+    // A small concurrency cap rather than one-at-a-time (slow) or all-at-once
+    // (hammers Zapier/Xero and makes failures harder to attribute) — process
+    // a couple of receipts in flight at once.
+    const CONCURRENCY = 2;
+    let cursor = 0;
+    async function worker(){
+      while(cursor < indices.length){
+        const idx = indices[cursor++];
+        await submitBatchItem(idx);
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(CONCURRENCY, indices.length)}, worker));
+
+    el('batchSubmitBtn').disabled = false;
+    el('batchSubmitBtn').textContent = 'Submit selected';
+    refreshHistory();
+  }
+
+  async function submitBatchItem(i){
+    const item = state.batch[i];
+    const d = item.draft;
+    const missing = batchItemMissing(d);
+    if(missing.length){
+      item.status = 'error';
+      item.message = `Still need: ${missing.join(', ')}`;
+      renderBatchRows();
+      return;
+    }
+    item.status = 'sending';
+    renderBatchRows();
+    try{
+      const {jobId} = await api('https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/submit', {
+        method:'POST',
+        body: JSON.stringify({ draft: d, contactId: d.contact_id || null, submitter: state.submitter, files: state.files })
+      });
+      const result = await pollJobForBatch(jobId);
+      if(result && result.success){
+        item.status = 'sent';
+        item.message = result.message || '';
+      } else {
+        item.status = 'error';
+        item.message = (result && result.message) || 'Unknown error';
+      }
+    }catch(err){
+      item.status = 'error';
+      item.message = err.message;
+    }
+    renderBatchRows();
+    const summary = el('batchSummary');
+    if(summary){
+      const readyCount = state.batch.filter(it => it.status==='ready' && batchItemMissing(it.draft).length===0).length;
+      const sentCount = state.batch.filter(it => it.status==='sent').length;
+      summary.textContent = `${sentCount} sent · ${readyCount} ready · ${state.batch.length} total`;
+    }
+  }
+
+  // Same poll loop as the single-document flow (pollSubmitJob), but returns
+  // the result instead of touching single-draft-screen DOM elements that
+  // don't exist on the batch list screen.
+  async function pollJobForBatch(jobId){
+    for(let attempt=0; attempt<POLL_MAX_ATTEMPTS; attempt++){
+      await sleep(POLL_INTERVAL_MS);
+      let job;
+      try{ job = await api(`https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/submit/status?id=${encodeURIComponent(jobId)}`); }
+      catch(err){ continue; }
+      if(job.status === 'pending') continue;
+      if(job.status === 'error'){
+        if(job.error === 'auth_required' && job.auth_url){
+          return {success:false, message:`Xero needs a one-time authorization — connect at ${job.auth_url}, then retry.`};
+        }
+        return {success:false, message: job.error || 'Unknown error'};
+      }
+      return job.result || {success:false, message:'No result returned.'};
+    }
+    return {success:false, message:'Still processing after 5 minutes — check Xero directly before retrying.'};
   }
 
   // ---------- rendering ----------
@@ -745,6 +940,7 @@
     setMain(`
       <div class="draft-wrap">
       <div class="manifest">
+        ${state.batch && state.focusedBatchIndex!=null ? `<div style="margin-bottom:10px;"><a href="#" id="backToBatchLink" style="font-size:13px;">← Back to batch (${state.batch.length})</a></div>` : ''}
         <div class="status-pill draft" id="stampEl">Draft</div>
         ${docPreviewHTML()}
         <div class="manifest-head">
@@ -960,6 +1156,21 @@
     });
 
     el('rejectBtn').addEventListener('click', ()=>{
+      if(state.batch && state.focusedBatchIndex!=null){
+        // Within a batch, discarding just drops this one receipt and
+        // returns to the list rather than resetting the whole upload.
+        state.batch.splice(state.focusedBatchIndex,1);
+        state.focusedBatchIndex = null;
+        state.draft = null;
+        if(state.batch.length) renderBatchList();
+        else {
+          state.batch = null; state.files = [];
+          renderFileList();
+          el('extractBtn').disabled = true;
+          setMain(`<div class="empty-state"><div class="glyph">▭</div><div class="lead">Discarded</div><div class="fine">Upload another document to start a new draft</div></div>`);
+        }
+        return;
+      }
       state.draft = null;
       state.files = [];
       renderFileList();
@@ -970,6 +1181,9 @@
         <div class="fine">Upload another document to start a new draft</div>
       </div>`);
     });
+
+    const backLink = el('backToBatchLink');
+    if(backLink) backLink.addEventListener('click', (e)=>{ e.preventDefault(); backToBatch(); });
 
     el('approveBtn').addEventListener('click', approveDraft);
   }
@@ -1028,6 +1242,16 @@
 
   function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
+  // If the item being sent from the single-draft screen belongs to a batch
+  // (opened via "Review" from the list), keep the list's status in sync so
+  // going back shows the real outcome instead of stale "ready".
+  function syncBatchStatusAfterSend(success, message){
+    if(!state.batch || state.focusedBatchIndex==null) return;
+    const item = state.batch[state.focusedBatchIndex];
+    item.status = success ? 'sent' : 'error';
+    item.message = message;
+  }
+
   async function pollSubmitJob(jobId){
     for(let attempt=0; attempt<POLL_MAX_ATTEMPTS; attempt++){
       await sleep(POLL_INTERVAL_MS);
@@ -1053,6 +1277,7 @@
         }
         el('approveBtn').disabled = false;
         el('approveBtn').textContent = 'Retry send to Xero';
+        syncBatchStatusAfterSend(false, job.error||'Unknown error');
         return;
       }
 
@@ -1066,10 +1291,12 @@
         const stamp = document.getElementById('stampEl');
         stamp.textContent = 'Sent'; stamp.classList.remove('draft'); stamp.classList.add('sent');
         el('approveBtn').textContent = 'Sent';
+        syncBatchStatusAfterSend(true, result.message||'');
       } else {
         el('sendStatusWrap').innerHTML = `<div class="send-status err">✕ Not sent: ${escHtml(result.message||'Unknown error')}</div>`;
         el('approveBtn').disabled = false;
         el('approveBtn').textContent = 'Retry send to Xero';
+        syncBatchStatusAfterSend(false, result.message||'Unknown error');
       }
       return;
     }
