@@ -190,11 +190,16 @@
   }
   .status-pill.draft{background:var(--status-yellow-bg);color:var(--status-yellow-fg);}
   .status-pill.sent{background:var(--status-green-bg);color:var(--status-green-fg);}
+  /* Inside the batch Next/Previous nav row, the pill sits inline with the
+     rest of that row instead of pinned to the card's absolute top-right
+     corner — otherwise it overlaps the nav buttons, which live in that
+     same corner when a batch is open. */
+  .status-pill.inline{position:static;display:inline-block;}
 
   .doc-preview{position:relative;max-height:260px;overflow:hidden;background:var(--light-gray);border-bottom:1px solid var(--line);}
   .doc-preview img{width:100%;max-height:260px;object-fit:contain;display:block;background:var(--text-primary);}
   .doc-preview-pdf{height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--text-secondary);font-size:12.5px;}
-  .doc-preview-pdf span:first-child{font-size:34px;}
+  .doc-preview-pdf .doc-preview-glyph{font-size:30px;color:var(--line);}
   .tracking-overlay{
     position:absolute;top:10px;left:10px;right:10px;display:flex;gap:10px;flex-wrap:wrap;
   }
@@ -978,7 +983,7 @@
     const src = `data:${f.mime};base64,${f.base64}`;
     const preview = isImage
       ? `<img src="${src}" alt="Source document">`
-      : `<div class="doc-preview-pdf"><span>📄</span><span>${escHtml(f.name)}</span></div>`;
+      : `<div class="doc-preview-pdf"><span class="doc-preview-glyph">▭</span><span>${escHtml(f.name)}</span></div>`;
     return `
       <div class="doc-preview">
         ${preview}
@@ -1013,13 +1018,13 @@
         ${state.batch && state.focusedBatchIndex!=null ? `
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
           <a href="#" id="backToBatchLink" style="font-size:13px;">← Back to batch (${state.batch.length})</a>
-          <div style="display:flex;gap:8px;align-items:center;">
+          <div style="display:flex;gap:10px;align-items:center;">
             <span style="font-size:12.5px;color:var(--text-label);">${state.focusedBatchIndex+1} of ${state.batch.length}</span>
             <button class="btn" id="batchPrevBtn" ${state.focusedBatchIndex===0?'disabled':''}>← Previous</button>
             <button class="btn" id="batchNextBtn">${state.focusedBatchIndex===state.batch.length-1?'Finish → Back to batch':'Next →'}</button>
+            <div class="status-pill inline draft" id="stampEl">Draft</div>
           </div>
-        </div>` : ''}
-        <div class="status-pill draft" id="stampEl">Draft</div>
+        </div>` : `<div class="status-pill draft" id="stampEl">Draft</div>`}
         ${docPreviewHTML()}
         <div class="manifest-head">
           <div class="mf">
