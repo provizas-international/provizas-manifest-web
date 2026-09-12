@@ -295,6 +295,12 @@
   .hist-empty{padding:22px;text-align:center;color:var(--slate);font-size:12.5px;}
   .hist-pagination{display:flex;align-items:center;justify-content:center;gap:14px;padding:14px 12px;}
   .hist-pagination .secondary-btn{flex:none;padding:6px 14px;}
+  .hist-filters{display:flex;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap;}
+  .hist-filters input[type="text"]{flex:1;min-width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:12.5px;}
+  .hist-filters select{padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:12.5px;}
+  .hist-detail-row td{background:var(--light-gray);padding:14px 16px;}
+  .hist-detail{display:flex;flex-direction:column;gap:6px;font-size:12.5px;}
+  .hist-detail strong{color:var(--text-label);font-weight:700;margin-right:4px;}
 </style>
 </head>
 <body>
@@ -359,7 +365,8 @@
 
   <div class="history">
     <div class="panel">
-      <h2 class="panel-head">Log</h2>
+      <h2 class="panel-head">Transactions History</h2>
+      <div id="historyFilters" class="hist-filters"></div>
       <div id="historyBody"><div class="hist-empty">Nothing submitted yet</div></div>
     </div>
   </div>
@@ -383,6 +390,8 @@
     history: [],
     historySort: {key:'when', dir:'desc'},
     historyPage: 0,
+    historyFilters: {type:'', status:'', q:''},
+    historyExpanded: null, // index (within the filtered/sorted list) of the currently expanded detail row
     tracking: [],
     items: [],
     bankAccounts: [],
@@ -695,7 +704,7 @@
       });
       if(Array.isArray(drafts) && drafts.length > 1){
         drafts.forEach(guessAndSetContact);
-        state.batch = drafts.map(d => ({draft: d, status: 'ready', message: ''}));
+        state.batch = drafts.map(d => ({draft: d, status: 'draft', message: '', checked: !d.possible_duplicate}));
         state.focusedBatchIndex = null;
         state.draft = null;
         renderBatchList();
@@ -720,23 +729,38 @@
     if(!state.submitter) missing.push('submitter');
     if(!d.contact_id) missing.push('contact');
     if(d.record_type === 'expense' && !d.bank_account_id) missing.push('bank account');
+    if(d.record_type === 'bill' && state.tracking.length){
+      const unfilled = state.tracking.filter(cat=>!d.tracking?.[cat.id]);
+      if(unfilled.length) missing.push(unfilled.map(c=>c.name).join(' and '));
+    }
     return missing;
   }
 
+  // Batch item status values: 'draft' (loaded, not yet reviewed) ->
+  // 'ready' (reviewed via Next/Previous and passes validation) -> 'sent' /
+  // 'error' (after a real submit attempt). A duplicate-flagged item starts
+  // unchecked by default so a repeat scan doesn't get silently resubmitted.
+  //
+  // Xero submission from this screen is intentionally a no-op right now —
+  // see BATCH_SUBMIT_ENABLED below — while the batch review UX itself is
+  // still being finalized. The single-document screen is unaffected.
+  const BATCH_SUBMIT_ENABLED = false;
+
   function renderBatchList(){
-    const readyCount = state.batch.filter(it => it.status === 'ready' && batchItemMissing(it.draft).length === 0).length;
+    const readyCount = state.batch.filter(it => it.status === 'ready').length;
+    const dupCount = state.batch.filter(it => it.draft.possible_duplicate).length;
     setMain(`
       <div class="draft-wrap">
       <div class="manifest">
         <div class="manifest-footer" style="border-bottom:1px solid var(--border,#e2e2ea);margin-bottom:0;">
-          <div class="footer-meta"><strong>${state.batch.length} receipts found</strong> — review each, then submit the ones you want sent.</div>
+          <div class="footer-meta"><strong>${state.batch.length} records found</strong> — review each, then submit the ones you want sent.${dupCount ? ` ${dupCount} look${dupCount===1?'s':''} like a possible duplicate of something already submitted — unchecked by default.` : ''}</div>
         </div>
         <div id="batchRows"></div>
         <div class="manifest-footer">
           <div class="footer-meta" id="batchSummary">${readyCount} of ${state.batch.length} ready to submit</div>
           <div class="actions">
             <button class="btn reject" id="batchDiscardAll">Discard all</button>
-            <button class="btn approve" id="batchSubmitBtn">Submit selected</button>
+            <button class="btn approve" id="batchSubmitBtn" ${BATCH_SUBMIT_ENABLED ? '' : 'title="Xero submission is temporarily off while this screen is being finalized"'}>Submit selected</button>
           </div>
         </div>
       </div>
@@ -757,13 +781,13 @@
     if(!wrap) return;
     wrap.innerHTML = state.batch.map((item,i)=>{
       const d = item.draft;
-      const missing = batchItemMissing(d);
       const total = calcTotalFor(d);
       const statusBadge = item.status === 'sent' ? `<span class="pill sent">sent</span>`
         : item.status === 'sending' ? `<span class="pill" style="background:var(--status-yellow-bg);color:var(--status-yellow-fg);">sending…</span>`
         : item.status === 'error' ? `<span class="pill failed" title="${escAttr(item.message||'')}">failed</span>`
-        : missing.length ? `<span class="pill failed" title="Still need: ${escAttr(missing.join(', '))}">needs review</span>`
-        : '';
+        : item.status === 'ready' ? `<span class="pill sent" title="Reviewed and ready to submit">Ready</span>`
+        : `<span class="pill" style="background:var(--status-yellow-bg);color:var(--status-yellow-fg);" title="Not reviewed yet">Draft</span>`;
+      const dupBadge = d.possible_duplicate ? `<span class="pill failed" title="Looks like it may already be in Xero — same reference, or same contact/total/currency as a past submission">possible duplicate</span>` : '';
       const checkDisabled = item.status === 'sent' || item.status === 'sending';
       return `
         <div class="batch-row" data-idx="${i}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border,#e2e2ea);">
@@ -772,17 +796,39 @@
             <div style="font-weight:700;">${escHtml(d.contact_name || '(no contact)')}</div>
             <div style="font-size:12.5px;color:var(--text-label);">${escHtml(d.document_date||'')} · ${escHtml(d.currency)} ${fmt(total)}</div>
           </div>
+          ${dupBadge}
           ${statusBadge}
           <button class="btn" data-review="${i}" ${item.status==='sending'?'disabled':''}>Review</button>
+          <button class="row-menu-btn" data-delete="${i}" title="Delete — remove from this batch" ${item.status==='sending'?'disabled':''}>✕</button>
         </div>
       `;
     }).join('');
     wrap.querySelectorAll('[data-review]').forEach(btn=>{
       btn.addEventListener('click', ()=>openBatchItem(+btn.dataset.review));
     });
+    wrap.querySelectorAll('[data-delete]').forEach(btn=>{
+      btn.addEventListener('click', ()=>removeBatchItem(+btn.dataset.delete));
+    });
     wrap.querySelectorAll('.batch-check').forEach(cb=>{
       cb.addEventListener('change', ()=>{ state.batch[+cb.dataset.idx].checked = cb.checked; });
     });
+  }
+
+  // Shared by the list row's ✕ and the expanded detail screen's Discard —
+  // drops one record from the batch entirely (not a submission outcome,
+  // just "don't process this one").
+  function removeBatchItem(i){
+    state.batch.splice(i,1);
+    if(state.focusedBatchIndex === i) state.focusedBatchIndex = null;
+    if(!state.batch.length){
+      state.batch = null; state.files = [];
+      renderFileList();
+      el('extractBtn').disabled = true;
+      setMain(`<div class="empty-state"><div class="glyph">▭</div><div class="lead">Discarded</div><div class="fine">Upload another document to start a new draft</div></div>`);
+      return;
+    }
+    if(state.focusedBatchIndex==null) renderBatchList();
+    else { state.draft = state.batch[state.focusedBatchIndex].draft; renderDraft(); }
   }
 
   function openBatchItem(i){
@@ -792,12 +838,36 @@
   }
 
   function backToBatch(){
+    markCurrentBatchItemReviewed();
     state.focusedBatchIndex = null;
     state.draft = null;
     renderBatchList();
   }
 
+  // Next/Previous acts as "I'm done reviewing this one for now": marks it
+  // Ready if it passes the same validation the submit step checks, leaves
+  // it Draft (with the reason visible) otherwise — either way it's just
+  // local state, no API call — then moves to the neighboring record.
+  function markCurrentBatchItemReviewed(){
+    if(state.focusedBatchIndex==null) return;
+    const item = state.batch[state.focusedBatchIndex];
+    if(item.status === 'sent' || item.status === 'sending') return;
+    const missing = batchItemMissing(item.draft);
+    item.status = missing.length ? 'draft' : 'ready';
+    item.message = missing.length ? `Still need: ${missing.join(', ')}` : '';
+  }
+  function navigateBatch(delta){
+    markCurrentBatchItemReviewed();
+    const next = state.focusedBatchIndex + delta;
+    if(next < 0 || next >= state.batch.length) { backToBatch(); return; }
+    openBatchItem(next);
+  }
+
   async function submitSelectedBatch(){
+    if(!BATCH_SUBMIT_ENABLED){
+      el('batchSummary').textContent = 'Xero submission is temporarily off while this screen is being finalized — nothing was sent.';
+      return;
+    }
     const indices = state.batch
       .map((item,i)=>({item,i}))
       .filter(({item}) => item.checked !== false && item.status !== 'sent' && item.status !== 'sending')
@@ -857,7 +927,7 @@
     renderBatchRows();
     const summary = el('batchSummary');
     if(summary){
-      const readyCount = state.batch.filter(it => it.status==='ready' && batchItemMissing(it.draft).length===0).length;
+      const readyCount = state.batch.filter(it => it.status==='ready').length;
       const sentCount = state.batch.filter(it => it.status==='sent').length;
       summary.textContent = `${sentCount} sent · ${readyCount} ready · ${state.batch.length} total`;
     }
@@ -940,7 +1010,15 @@
     setMain(`
       <div class="draft-wrap">
       <div class="manifest">
-        ${state.batch && state.focusedBatchIndex!=null ? `<div style="margin-bottom:10px;"><a href="#" id="backToBatchLink" style="font-size:13px;">← Back to batch (${state.batch.length})</a></div>` : ''}
+        ${state.batch && state.focusedBatchIndex!=null ? `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+          <a href="#" id="backToBatchLink" style="font-size:13px;">← Back to batch (${state.batch.length})</a>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <span style="font-size:12.5px;color:var(--text-label);">${state.focusedBatchIndex+1} of ${state.batch.length}</span>
+            <button class="btn" id="batchPrevBtn" ${state.focusedBatchIndex===0?'disabled':''}>← Previous</button>
+            <button class="btn" id="batchNextBtn">${state.focusedBatchIndex===state.batch.length-1?'Finish → Back to batch':'Next →'}</button>
+          </div>
+        </div>` : ''}
         <div class="status-pill draft" id="stampEl">Draft</div>
         ${docPreviewHTML()}
         <div class="manifest-head">
@@ -1157,18 +1235,9 @@
 
     el('rejectBtn').addEventListener('click', ()=>{
       if(state.batch && state.focusedBatchIndex!=null){
-        // Within a batch, discarding just drops this one receipt and
+        // Within a batch, discarding just drops this one record and
         // returns to the list rather than resetting the whole upload.
-        state.batch.splice(state.focusedBatchIndex,1);
-        state.focusedBatchIndex = null;
-        state.draft = null;
-        if(state.batch.length) renderBatchList();
-        else {
-          state.batch = null; state.files = [];
-          renderFileList();
-          el('extractBtn').disabled = true;
-          setMain(`<div class="empty-state"><div class="glyph">▭</div><div class="lead">Discarded</div><div class="fine">Upload another document to start a new draft</div></div>`);
-        }
+        removeBatchItem(state.focusedBatchIndex);
         return;
       }
       state.draft = null;
@@ -1184,6 +1253,10 @@
 
     const backLink = el('backToBatchLink');
     if(backLink) backLink.addEventListener('click', (e)=>{ e.preventDefault(); backToBatch(); });
+    const prevBtn = el('batchPrevBtn');
+    if(prevBtn) prevBtn.addEventListener('click', ()=>navigateBatch(-1));
+    const nextBtn = el('batchNextBtn');
+    if(nextBtn) nextBtn.addEventListener('click', ()=>navigateBatch(1));
 
     el('approveBtn').addEventListener('click', approveDraft);
   }
@@ -1324,9 +1397,40 @@
   ];
   const HIST_PAGE_SIZE = 50;
 
+  function filteredHistory(){
+    const {type, status, q} = state.historyFilters;
+    const needle = q.trim().toLowerCase();
+    return state.history.filter(h=>{
+      if(type && h.type !== type) return false;
+      if(status === 'success' && !h.success) return false;
+      if(status === 'failed' && h.success) return false;
+      if(needle && !(`${h.contact||''} ${h.reference||''}`.toLowerCase().includes(needle))) return false;
+      return true;
+    });
+  }
+
+  function renderHistoryFilters(){
+    const types = [...new Set(state.history.map(h=>h.type))].sort();
+    el('historyFilters').innerHTML = `
+      <input type="text" id="histSearch" placeholder="Search contact or reference…" value="${escAttr(state.historyFilters.q)}">
+      <select id="histTypeFilter">
+        <option value="">All types</option>
+        ${types.map(t=>`<option value="${t}" ${state.historyFilters.type===t?'selected':''}>${t}</option>`).join('')}
+      </select>
+      <select id="histStatusFilter">
+        <option value="">All statuses</option>
+        <option value="success" ${state.historyFilters.status==='success'?'selected':''}>Sent</option>
+        <option value="failed" ${state.historyFilters.status==='failed'?'selected':''}>Failed</option>
+      </select>
+    `;
+    el('histSearch').addEventListener('input', e=>{ state.historyFilters.q = e.target.value; state.historyPage = 0; renderHistory(); });
+    el('histTypeFilter').addEventListener('change', e=>{ state.historyFilters.type = e.target.value; state.historyPage = 0; renderHistory(); });
+    el('histStatusFilter').addEventListener('change', e=>{ state.historyFilters.status = e.target.value; state.historyPage = 0; renderHistory(); });
+  }
+
   function sortedHistory(){
     const {key, dir} = state.historySort;
-    const rows = state.history.slice();
+    const rows = filteredHistory();
     rows.sort((a,b)=>{
       let av = a[key], bv = b[key];
       if(key === 'when'){ av = new Date(av).getTime(); bv = new Date(bv).getTime(); }
@@ -1341,11 +1445,16 @@
   }
 
   function renderHistory(){
+    renderHistoryFilters();
     if(!state.history.length){
       el('historyBody').innerHTML = `<div class="hist-empty">Nothing submitted yet</div>`;
       return;
     }
     const all = sortedHistory();
+    if(!all.length){
+      el('historyBody').innerHTML = `<div class="hist-empty">No transactions match these filters</div>`;
+      return;
+    }
     const totalPages = Math.max(1, Math.ceil(all.length / HIST_PAGE_SIZE));
     state.historyPage = Math.min(state.historyPage, totalPages - 1);
     const pageRows = all.slice(state.historyPage*HIST_PAGE_SIZE, state.historyPage*HIST_PAGE_SIZE + HIST_PAGE_SIZE);
@@ -1357,8 +1466,10 @@
           <th data-sort="${c.key}">${c.label}${sortKey===c.key ? `<span class="sort-arrow">${sortDir==='asc'?'▲':'▼'}</span>` : ''}</th>
         `).join('')}</tr></thead>
         <tbody>
-          ${pageRows.map(h=>`
-            <tr>
+          ${pageRows.map((h,i)=>{
+            const expanded = state.historyExpanded === i;
+            return `
+            <tr class="hist-row" data-hist-idx="${i}" style="cursor:pointer;">
               <td>${new Date(h.when).toLocaleDateString()}</td>
               <td>${h.type}</td>
               <td>${escHtml(h.contact)}</td>
@@ -1367,7 +1478,16 @@
               <td>${escHtml(h.submitter||'—')}</td>
               <td><span class="pill ${h.success?'sent':'failed'}">${h.success?'sent':'failed'}</span></td>
             </tr>
-          `).join('')}
+            ${expanded ? `
+            <tr class="hist-detail-row"><td colspan="${HIST_COLUMNS.length}">
+              <div class="hist-detail">
+                <div><strong>Record number:</strong> ${escHtml(h.record_number||'—')}</div>
+                <div><strong>Submitted:</strong> ${new Date(h.when).toLocaleString()}</div>
+                <div><strong>Result:</strong> ${h.success ? 'Success' : 'Failed'}</div>
+                <div><strong>Details:</strong> ${escHtml(h.message||'—')}</div>
+              </div>
+            </td></tr>` : ''}
+          `;}).join('')}
         </tbody>
       </table>
       ${totalPages > 1 ? `
@@ -1388,12 +1508,20 @@
           state.historySort = {key: k, dir: 'asc'};
         }
         state.historyPage = 0;
+        state.historyExpanded = null;
+        renderHistory();
+      });
+    });
+    document.querySelectorAll('tr.hist-row').forEach(tr=>{
+      tr.addEventListener('click', ()=>{
+        const idx = +tr.dataset.histIdx;
+        state.historyExpanded = state.historyExpanded === idx ? null : idx;
         renderHistory();
       });
     });
     const prevBtn = el('histPrevBtn'), nextBtn = el('histNextBtn');
-    if(prevBtn) prevBtn.addEventListener('click', ()=>{ state.historyPage--; renderHistory(); });
-    if(nextBtn) nextBtn.addEventListener('click', ()=>{ state.historyPage++; renderHistory(); });
+    if(prevBtn) prevBtn.addEventListener('click', ()=>{ state.historyPage--; state.historyExpanded = null; renderHistory(); });
+    if(nextBtn) nextBtn.addEventListener('click', ()=>{ state.historyPage++; state.historyExpanded = null; renderHistory(); });
   }
 
   // ---------- utils ----------
