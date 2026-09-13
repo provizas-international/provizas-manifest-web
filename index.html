@@ -366,6 +366,10 @@
   .hist-detail{display:flex;flex-direction:column;gap:6px;font-size:12.5px;}
   .hist-detail strong{color:var(--text-label);font-weight:700;margin-right:4px;}
 </style>
+<!-- Used only to rasterize a PDF page so a batch record's own bbox can be
+     cropped out of it as a standalone image — see cropBatchAttachment(). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>if(window['pdfjsLib']) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
 <body>
 
@@ -775,6 +779,7 @@
         state.focusedBatchIndex = null;
         state.draft = null;
         renderBatchList();
+        cropAllBatchAttachments();
         return;
       }
       state.batch = null;
@@ -974,10 +979,14 @@
     }
     item.status = 'sending';
     renderBatchRows();
+    // Attach this record's own cropped scan, not the whole multi-record
+    // source file — falls back to the full file only if cropping never
+    // produced one (e.g. extraction didn't return a bbox for it).
+    const filesToSend = item.croppedFile ? [item.croppedFile] : state.files;
     try{
       const {jobId} = await api('https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/submit', {
         method:'POST',
-        body: JSON.stringify({ draft: d, contactId: d.contact_id || null, submitter: state.submitter, files: state.files })
+        body: JSON.stringify({ draft: d, contactId: d.contact_id || null, submitter: state.submitter, files: filesToSend })
       });
       const result = await pollJobForBatch(jobId);
       if(result && result.success){
@@ -1071,13 +1080,94 @@
   }
 
   // ---------- source document viewer modal ----------
+  // ---------- per-record attachment cropping (batch mode) ----------
+  // A batch extracted from one multi-record scan has every record sharing
+  // that same source file — attaching the whole thing to every one of N
+  // Xero records would be wrong (and confusing to review). Instead, the
+  // extraction step also returns each record's own bbox on the page, and
+  // this crops exactly that region out client-side (rasterizing the PDF
+  // page via pdf.js first, if the source isn't already an image) into its
+  // own small PNG — used both as the "View source" preview and as the
+  // actual file attached to that record's Xero submission.
+  function imageFileToCanvas(file){
+    return new Promise((resolve, reject)=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        resolve(canvas);
+      };
+      img.onerror = ()=>reject(new Error('Could not load image for cropping'));
+      img.src = `data:${file.mime};base64,${file.base64}`;
+    });
+  }
+  async function pdfPageToCanvas(file, pageNum){
+    if(!window.pdfjsLib) throw new Error('PDF renderer not loaded');
+    const bin = atob(file.base64);
+    const bytes = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    const pdf = await pdfjsLib.getDocument({data: bytes}).promise;
+    const page = await pdf.getPage(Math.min(Math.max(1, pageNum), pdf.numPages));
+    const viewport = page.getViewport({scale: 2}); // 2x for a legible crop, not just a thumbnail
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+    return canvas;
+  }
+  // Cropping the same source page for every record in a batch — render it
+  // once and reuse, rather than re-rasterizing per record.
+  async function sourceFileToCanvas(file, page, cache){
+    const key = file.mime.startsWith('image/') ? 'image' : `pdf-p${page}`;
+    if(cache.has(key)) return cache.get(key);
+    const canvas = file.mime.startsWith('image/') ? await imageFileToCanvas(file) : await pdfPageToCanvas(file, page);
+    cache.set(key, canvas);
+    return canvas;
+  }
+  async function cropBatchAttachment(file, page, bbox, cache){
+    if(!file) throw new Error('No source file');
+    const canvas = await sourceFileToCanvas(file, page, cache);
+    const [x0,y0,x1,y1] = bbox;
+    const sx = Math.max(0, Math.round(x0*canvas.width)), sy = Math.max(0, Math.round(y0*canvas.height));
+    const sw = Math.max(1, Math.round((x1-x0)*canvas.width)), sh = Math.max(1, Math.round((y1-y0)*canvas.height));
+    const out = document.createElement('canvas');
+    out.width = sw; out.height = sh;
+    out.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+    const base64 = out.toDataURL('image/png').split(',')[1];
+    const base = (file.name || 'document').replace(/\.[^.]+$/, '');
+    return { name: `${base}-crop.png`, mime: 'image/png', base64 };
+  }
+  // Fire-and-forget after a batch is loaded: crops each record's own
+  // attachment in the background and live-updates whichever screen is
+  // currently showing as each one finishes, rather than blocking the list
+  // on however long rasterizing every record takes.
+  async function cropAllBatchAttachments(){
+    if(!state.batch || !state.files[0]) return;
+    const items = state.batch.slice(); // stable snapshot — safe even if the user deletes an item mid-crop
+    const cache = new Map();
+    for(const item of items){
+      if(!state.batch || !state.batch.includes(item)) continue; // discarded meanwhile
+      const d = item.draft;
+      if(!d.bbox) continue; // no crop info from extraction — falls back to the full file
+      try{
+        item.croppedFile = await cropBatchAttachment(state.files[0], d.page || 1, d.bbox, cache);
+      }catch(err){
+        console.error('Attachment crop failed:', err.message);
+      }
+      if(!state.batch || !state.batch.includes(item)) continue;
+      const idx = state.batch.indexOf(item);
+      if(state.focusedBatchIndex === idx) renderDraft();
+      else if(state.focusedBatchIndex == null) renderBatchRows();
+    }
+  }
+
   // "View source" lets the reviewer visually cross-check the extracted
   // fields against the actual scan — a zoomable image (or native PDF
-  // render) on the left, the current draft's data on the right. Note:
-  // for a batch extracted from one multi-record scan, every record in
-  // that batch shares this same original file — there's no per-record
-  // cropping yet, so this shows the whole document, not just this one
-  // record's portion of it.
+  // render) on the left, the current draft's data on the right. In batch
+  // mode this shows the cropped single-record attachment once ready
+  // (falling back to the full page while cropping is still in flight, or
+  // if extraction didn't return a bbox for this record), with a toggle to
+  // see the full original page for context.
   function viewableKind(mime){
     if(mime.startsWith('image/')) return 'image';
     if(mime === 'application/pdf') return 'pdf';
@@ -1085,8 +1175,19 @@
   }
 
   function openSourceModal(){
-    state.sourceModal = {fileIndex: 0, zoom: 1};
+    state.sourceModal = {fileIndex: 0, zoom: 1, showFull: false};
     renderSourceModal();
+  }
+  function toggleSourceModalFull(){
+    if(!state.sourceModal) return;
+    state.sourceModal.showFull = !state.sourceModal.showFull;
+    state.sourceModal.zoom = 1;
+    renderSourceModal();
+  }
+  // The batch item currently open in the detail screen, if any — its own
+  // cropped attachment is what "View source" prefers to show.
+  function currentBatchItem(){
+    return (state.batch && state.focusedBatchIndex != null) ? state.batch[state.focusedBatchIndex] : null;
   }
   function closeSourceModal(){
     state.sourceModal = null;
@@ -1143,7 +1244,12 @@
     const sm = state.sourceModal;
     const root = el('sourceModalRoot');
     if(!sm){ root.innerHTML = ''; return; }
-    const f = state.files[sm.fileIndex];
+
+    const batchItem = currentBatchItem();
+    const hasCrop = !!(batchItem && batchItem.croppedFile);
+    const cropPending = !!(batchItem && batchItem.draft.bbox && !batchItem.croppedFile);
+    const useCrop = hasCrop && !sm.showFull;
+    const f = useCrop ? batchItem.croppedFile : state.files[sm.fileIndex];
     const kind = f ? viewableKind(f.mime) : 'none';
     const src = f ? `data:${f.mime};base64,${f.base64}` : '';
     const viewerInner = !f ? `<div style="color:var(--white);">No source file available</div>`
@@ -1155,17 +1261,21 @@
       <div class="source-modal-backdrop" id="sourceModalBackdrop">
         <div class="source-modal" id="sourceModalCard">
           <div class="source-modal-head">
-            <div class="source-modal-title">Source document${f ? ' — ' + escHtml(f.name) : ''}</div>
+            <div class="source-modal-title">
+              Source document${f ? ' — ' + escHtml(f.name) : ''}
+              ${useCrop ? `<span style="font-weight:400;color:var(--text-label);font-size:12px;"> · cropped to just this record — this is what will attach to Xero</span>` : ''}
+            </div>
             <button class="source-modal-close" id="sourceModalCloseBtn" aria-label="Close">✕</button>
           </div>
           <div class="source-modal-body">
             <div class="source-modal-viewer">
-              ${state.files.length > 1 ? `
+              ${!useCrop && state.files.length > 1 ? `
               <div class="source-modal-filenav">
                 <button id="sourceModalPrevFile" ${sm.fileIndex===0?'disabled':''}>←</button>
                 <span>File ${sm.fileIndex+1} of ${state.files.length}</span>
                 <button id="sourceModalNextFile" ${sm.fileIndex===state.files.length-1?'disabled':''}>→</button>
               </div>` : ''}
+              ${cropPending ? `<div class="source-modal-filenav">Cropping this record's attachment…</div>` : ''}
               <div class="source-modal-viewer-inner" style="${kind === 'image' ? `transform:scale(${sm.zoom});` : ''}">${viewerInner}</div>
               ${kind === 'image' ? `
               <div class="source-modal-zoom">
@@ -1174,7 +1284,10 @@
                 <button id="sourceModalZoomIn" title="Zoom in">+</button>
               </div>` : ''}
             </div>
-            <div class="source-modal-data">${sourceModalDataPanelHTML()}</div>
+            <div class="source-modal-data">
+              ${hasCrop ? `<a href="#" id="sourceModalToggleFull" style="font-size:12px;display:inline-block;margin-bottom:10px;">${sm.showFull ? '← Back to cropped record' : 'View full original page →'}</a>` : ''}
+              ${sourceModalDataPanelHTML()}
+            </div>
           </div>
         </div>
       </div>
@@ -1186,6 +1299,8 @@
     const zoomInBtn = el('sourceModalZoomIn'); if(zoomInBtn) zoomInBtn.addEventListener('click', ()=>zoomSourceModal(0.25));
     const prevFileBtn = el('sourceModalPrevFile'); if(prevFileBtn) prevFileBtn.addEventListener('click', ()=>navSourceModalFile(-1));
     const nextFileBtn = el('sourceModalNextFile'); if(nextFileBtn) nextFileBtn.addEventListener('click', ()=>navSourceModalFile(1));
+    const toggleFullLink = el('sourceModalToggleFull');
+    if(toggleFullLink) toggleFullLink.addEventListener('click', (e)=>{ e.preventDefault(); toggleSourceModalFull(); });
   }
 
   document.addEventListener('keydown', (e)=>{
@@ -1493,10 +1608,14 @@
     el('approveBtn').textContent = 'Sending…';
     el('sendStatusWrap').innerHTML = `<div class="send-status">Sending to Xero…</div>`;
 
+    // Within a batch, attach this record's own cropped scan rather than
+    // the whole multi-record source file it came from.
+    const batchItemForSubmit = currentBatchItem();
+    const filesToSend = (batchItemForSubmit && batchItemForSubmit.croppedFile) ? [batchItemForSubmit.croppedFile] : state.files;
     try{
       const {jobId} = await api('https://ghwspgyczkgqqrvuhism.supabase.co/functions/v1/manifest/api/submit', {
         method:'POST',
-        body: JSON.stringify({ draft: d, contactId: d.contact_id || null, submitter: state.submitter, files: state.files })
+        body: JSON.stringify({ draft: d, contactId: d.contact_id || null, submitter: state.submitter, files: filesToSend })
       });
       await pollSubmitJob(jobId);
     }catch(err){
