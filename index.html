@@ -200,6 +200,65 @@
   .doc-preview img{width:100%;max-height:260px;object-fit:contain;display:block;background:var(--text-primary);}
   .doc-preview-pdf{height:180px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--text-secondary);font-size:12.5px;}
   .doc-preview-pdf .doc-preview-glyph{font-size:30px;color:var(--line);}
+  .doc-preview-viewbtn{
+    position:absolute;top:10px;left:10px;z-index:2;
+    display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;
+    background:rgba(20,20,30,0.72);color:var(--white);border:none;font-size:12px;font-weight:700;
+    cursor:pointer;backdrop-filter:blur(2px);
+  }
+  .doc-preview-viewbtn:hover{background:rgba(20,20,30,0.88);}
+
+  /* ---- Source document viewer modal ---- */
+  .source-modal-backdrop{
+    position:fixed;inset:0;background:rgba(20,20,30,0.72);z-index:1000;
+    display:flex;align-items:center;justify-content:center;padding:24px;
+  }
+  .source-modal{
+    background:var(--white);width:100%;max-width:1200px;height:100%;max-height:820px;
+    border-radius:10px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.35);
+  }
+  .source-modal-head{
+    display:flex;align-items:center;justify-content:space-between;padding:14px 18px;
+    border-bottom:1px solid var(--line);flex:none;
+  }
+  .source-modal-title{font-weight:700;font-size:14px;}
+  .source-modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary);line-height:1;padding:4px 8px;}
+  .source-modal-close:hover{color:var(--text-primary);}
+  .source-modal-body{flex:1;display:flex;min-height:0;}
+  .source-modal-viewer{
+    flex:1 1 60%;position:relative;background:var(--light-gray);overflow:auto;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .source-modal-viewer-inner{transform-origin:center center;transition:transform 0.12s ease-out;}
+  .source-modal-viewer-inner img{display:block;max-width:none;}
+  .source-modal-viewer-inner iframe{width:640px;height:820px;border:none;background:var(--white);}
+  .source-modal-zoom{
+    position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
+    display:flex;align-items:center;gap:6px;background:rgba(20,20,30,0.75);border-radius:20px;padding:6px 10px;
+  }
+  .source-modal-zoom button{
+    background:none;border:none;color:var(--white);font-size:16px;font-weight:700;cursor:pointer;
+    width:26px;height:26px;line-height:1;border-radius:50%;
+  }
+  .source-modal-zoom button:hover{background:rgba(255,255,255,0.15);}
+  .source-modal-zoom span{color:var(--white);font-size:12px;min-width:38px;text-align:center;}
+  .source-modal-filenav{
+    position:absolute;top:14px;left:50%;transform:translateX(-50%);
+    display:flex;align-items:center;gap:8px;background:rgba(20,20,30,0.75);border-radius:20px;padding:5px 12px;
+    color:var(--white);font-size:12px;
+  }
+  .source-modal-filenav button{background:none;border:none;color:var(--white);font-size:14px;cursor:pointer;padding:2px 6px;}
+  .source-modal-filenav button:disabled{opacity:0.35;cursor:default;}
+  .source-modal-data{
+    flex:1 1 40%;max-width:420px;border-left:1px solid var(--line);overflow-y:auto;padding:18px 20px;
+    font-size:12.5px;
+  }
+  .source-modal-data h4{font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-label);margin:16px 0 6px;font-weight:700;}
+  .source-modal-data h4:first-child{margin-top:0;}
+  .source-modal-data table{width:100%;border-collapse:collapse;margin-top:4px;}
+  .source-modal-data td{padding:4px 0;vertical-align:top;}
+  .source-modal-data td:first-child{color:var(--text-label);white-space:nowrap;padding-right:10px;}
+  .source-modal-line-row{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--light-gray);}
   .tracking-overlay{
     position:absolute;top:10px;left:10px;right:10px;display:flex;gap:10px;flex-wrap:wrap;
   }
@@ -377,6 +436,8 @@
   </div>
 </div>
 
+<div id="sourceModalRoot"></div>
+
 <script>
 (function(){
   const state = {
@@ -389,6 +450,7 @@
     // the source of truth for the list view and bulk submit.
     batch: null,
     focusedBatchIndex: null,
+    sourceModal: null, // {fileIndex, zoom} while the "View source" modal is open
     submitter: null,
     contacts: [],
     contactsSyncedAt: null,
@@ -986,6 +1048,7 @@
       : `<div class="doc-preview-pdf"><span class="doc-preview-glyph">▭</span><span>${escHtml(f.name)}</span></div>`;
     return `
       <div class="doc-preview">
+        <button class="doc-preview-viewbtn" id="viewSourceBtn" title="View the original scanned document alongside the extracted data">🔍 View source</button>
         ${preview}
         ${state.draft.record_type === 'bill' && state.tracking.length ? trackingOverlayHTML() : ''}
       </div>
@@ -1006,6 +1069,129 @@
       </div>
     `;
   }
+
+  // ---------- source document viewer modal ----------
+  // "View source" lets the reviewer visually cross-check the extracted
+  // fields against the actual scan — a zoomable image (or native PDF
+  // render) on the left, the current draft's data on the right. Note:
+  // for a batch extracted from one multi-record scan, every record in
+  // that batch shares this same original file — there's no per-record
+  // cropping yet, so this shows the whole document, not just this one
+  // record's portion of it.
+  function viewableKind(mime){
+    if(mime.startsWith('image/')) return 'image';
+    if(mime === 'application/pdf') return 'pdf';
+    return 'none';
+  }
+
+  function openSourceModal(){
+    state.sourceModal = {fileIndex: 0, zoom: 1};
+    renderSourceModal();
+  }
+  function closeSourceModal(){
+    state.sourceModal = null;
+    el('sourceModalRoot').innerHTML = '';
+  }
+  function zoomSourceModal(delta){
+    if(!state.sourceModal) return;
+    state.sourceModal.zoom = Math.max(0.25, Math.min(4, Math.round((state.sourceModal.zoom + delta) * 20) / 20));
+    renderSourceModal();
+  }
+  function navSourceModalFile(delta){
+    if(!state.sourceModal) return;
+    const next = state.sourceModal.fileIndex + delta;
+    if(next < 0 || next >= state.files.length) return;
+    state.sourceModal.fileIndex = next;
+    state.sourceModal.zoom = 1;
+    renderSourceModal();
+  }
+
+  function sourceModalDataPanelHTML(){
+    const d = state.draft;
+    if(!d) return '';
+    const total = calcTotal();
+    return `
+      <h4>Header</h4>
+      <table>
+        <tr><td>Record type</td><td>${escHtml(d.record_type)}</td></tr>
+        <tr><td>Contact</td><td>${escHtml(d.contact_name || '—')}</td></tr>
+        <tr><td>Reference</td><td>${escHtml(d.reference || '—')}</td></tr>
+        <tr><td>Document date</td><td>${escHtml(d.document_date || '—')}</td></tr>
+        <tr><td>Due date</td><td>${escHtml(d.due_date || '—')}</td></tr>
+        <tr><td>Currency</td><td>${escHtml(d.currency)}</td></tr>
+      </table>
+      ${d.record_type === 'bill' && d.tracking && state.tracking.length ? `
+      <h4>Tracking</h4>
+      <table>
+        ${state.tracking.map(cat=>`<tr><td>${escHtml(cat.name)}</td><td>${escHtml(d.tracking[cat.id] || '—')}</td></tr>`).join('')}
+      </table>` : ''}
+      <h4>Line items</h4>
+      ${d.line_items.map(li=>`
+        <div class="source-modal-line-row">
+          <span>${escHtml(li.item_code ? `[${li.item_code}] ${itemLabel(li.item_code)}` : (li.description || '(no description)'))}</span>
+          <span>${li.quantity} × ${fmt(li.unit_amount)} = ${fmt(li.quantity*li.unit_amount)}</span>
+        </div>
+      `).join('')}
+      <div class="source-modal-line-row" style="font-weight:700;border-bottom:none;margin-top:6px;">
+        <span>Total</span><span>${escHtml(d.currency)} ${fmt(total)}</span>
+      </div>
+      ${d.notes ? `<h4>Notes</h4><div>${escHtml(d.notes)}</div>` : ''}
+    `;
+  }
+
+  function renderSourceModal(){
+    const sm = state.sourceModal;
+    const root = el('sourceModalRoot');
+    if(!sm){ root.innerHTML = ''; return; }
+    const f = state.files[sm.fileIndex];
+    const kind = f ? viewableKind(f.mime) : 'none';
+    const src = f ? `data:${f.mime};base64,${f.base64}` : '';
+    const viewerInner = !f ? `<div style="color:var(--white);">No source file available</div>`
+      : kind === 'image' ? `<img src="${src}" alt="Source document">`
+      : kind === 'pdf' ? `<iframe src="${src}" title="Source document"></iframe>`
+      : `<div style="color:var(--white);text-align:center;padding:24px;">${escHtml(f.name)}<br><span style="opacity:0.7;font-size:12px;">This file type can't be previewed here — see the extracted data on the right.</span></div>`;
+
+    root.innerHTML = `
+      <div class="source-modal-backdrop" id="sourceModalBackdrop">
+        <div class="source-modal" id="sourceModalCard">
+          <div class="source-modal-head">
+            <div class="source-modal-title">Source document${f ? ' — ' + escHtml(f.name) : ''}</div>
+            <button class="source-modal-close" id="sourceModalCloseBtn" aria-label="Close">✕</button>
+          </div>
+          <div class="source-modal-body">
+            <div class="source-modal-viewer">
+              ${state.files.length > 1 ? `
+              <div class="source-modal-filenav">
+                <button id="sourceModalPrevFile" ${sm.fileIndex===0?'disabled':''}>←</button>
+                <span>File ${sm.fileIndex+1} of ${state.files.length}</span>
+                <button id="sourceModalNextFile" ${sm.fileIndex===state.files.length-1?'disabled':''}>→</button>
+              </div>` : ''}
+              <div class="source-modal-viewer-inner" style="${kind === 'image' ? `transform:scale(${sm.zoom});` : ''}">${viewerInner}</div>
+              ${kind === 'image' ? `
+              <div class="source-modal-zoom">
+                <button id="sourceModalZoomOut" title="Zoom out">−</button>
+                <span>${Math.round(sm.zoom*100)}%</span>
+                <button id="sourceModalZoomIn" title="Zoom in">+</button>
+              </div>` : ''}
+            </div>
+            <div class="source-modal-data">${sourceModalDataPanelHTML()}</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    el('sourceModalCloseBtn').addEventListener('click', closeSourceModal);
+    el('sourceModalBackdrop').addEventListener('click', (e)=>{ if(e.target.id === 'sourceModalBackdrop') closeSourceModal(); });
+    const zoomOutBtn = el('sourceModalZoomOut'); if(zoomOutBtn) zoomOutBtn.addEventListener('click', ()=>zoomSourceModal(-0.25));
+    const zoomInBtn = el('sourceModalZoomIn'); if(zoomInBtn) zoomInBtn.addEventListener('click', ()=>zoomSourceModal(0.25));
+    const prevFileBtn = el('sourceModalPrevFile'); if(prevFileBtn) prevFileBtn.addEventListener('click', ()=>navSourceModalFile(-1));
+    const nextFileBtn = el('sourceModalNextFile'); if(nextFileBtn) nextFileBtn.addEventListener('click', ()=>navSourceModalFile(1));
+  }
+
+  document.addEventListener('keydown', (e)=>{
+    if(!state.sourceModal) return;
+    if(e.key === 'Escape') closeSourceModal();
+  });
 
   function renderDraft(){
     const d = state.draft;
@@ -1191,6 +1377,8 @@
   }
 
   function bindDraftEvents(){
+    const viewSourceBtn = el('viewSourceBtn');
+    if(viewSourceBtn) viewSourceBtn.addEventListener('click', openSourceModal);
     el('mf_type').addEventListener('change', e=>{ state.draft.record_type = e.target.value; renderDraft(); });
     el('mf_ref').addEventListener('input', e=>{ state.draft.reference = e.target.value; });
     el('mf_date').addEventListener('input', e=>{ state.draft.document_date = e.target.value; if(state.draft.record_type==='expense') refreshFxPreview(); });
