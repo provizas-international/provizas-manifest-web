@@ -2016,7 +2016,23 @@
     const wrap = el('userArea');
     if(!sb || !state.session || !state.session.user){ wrap.innerHTML = ''; return; }
     wrap.innerHTML = `<span class="user-email">${escHtml(state.session.user.email||'')}</span><button class="signout-btn" id="signOutBtn">Sign out</button>`;
-    el('signOutBtn').addEventListener('click', async ()=>{ await sb.auth.signOut(); });
+    el('signOutBtn').addEventListener('click', async ()=>{
+      const btn = el('signOutBtn');
+      btn.disabled = true; btn.textContent = 'Signing out…';
+      try{
+        await sb.auth.signOut();
+      }catch(err){
+        console.error('Sign out request failed (clearing the local session anyway):', err);
+      }
+      // Don't rely solely on onAuthStateChange firing a SIGNED_OUT event to
+      // update the UI — update it directly here too, so clicking Sign out
+      // always has a visible effect even if that event doesn't arrive (this
+      // is exactly what was reported: signOut() may succeed while the UI
+      // itself never changes).
+      state.session = null;
+      renderUserArea();
+      renderAuthGate();
+    });
   }
   // Nothing about the app itself — menu, content, even the header — shows
   // until signed in; signed-out visitors only ever see the landing page.
