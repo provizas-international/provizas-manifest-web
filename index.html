@@ -53,6 +53,11 @@
     --font-body:'Inter',-apple-system,sans-serif;
   }
   *{box-sizing:border-box;}
+  /* Any element with its own display value (flex, grid, ...) otherwise
+     overrides the browser's default [hidden]{display:none} — this makes
+     the hidden attribute always win, so el.hidden=true reliably hides
+     regardless of what display value that element's own CSS sets. */
+  [hidden]{display:none!important;}
   html,body{margin:0;padding:0;}
   body{
     background:var(--light-gray);
@@ -105,6 +110,22 @@
   }
   .user-area .signin-btn:hover, .user-area .signout-btn:hover{background:rgba(255,255,255,0.12);}
   .user-area .user-email{opacity:0.85;}
+
+  /* ---------- landing page (signed out) ---------- */
+  .landing{
+    min-height:100vh;background:var(--navy);display:flex;align-items:center;justify-content:center;
+    padding:24px;
+  }
+  .landing-card{text-align:center;max-width:360px;}
+  .landing-symbol{height:56px;margin-bottom:22px;}
+  .landing-card h1{color:var(--white);font-size:26px;margin-bottom:10px;}
+  .landing-card p{color:rgba(255,255,255,0.65);font-size:14px;line-height:1.5;margin:0 0 26px;}
+  .landing-signin{
+    background:var(--white);color:var(--navy);border:none;border-radius:8px;
+    padding:12px 28px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font-head);
+  }
+  .landing-signin:hover{background:#f0f0f5;}
+  .landing-note{color:rgba(255,255,255,0.4);font-size:11.5px;margin-top:22px;}
 
   /* ---------- app shell: left nav + content ---------- */
   .app-body{display:flex;align-items:stretch;min-height:calc(100vh - 56px);}
@@ -413,10 +434,20 @@
 </head>
 <body>
 
-<header class="top">
+<div class="landing" id="landingPage" hidden>
+  <div class="landing-card">
+    <img class="landing-symbol" src="/assets/symbol-reverse.png" alt="Provizas" onerror="this.style.display='none'">
+    <h1>Provizas Hub</h1>
+    <p>Financial transactions, order management, documents, and shipments — in one place.</p>
+    <button class="signin-btn landing-signin" id="landingSignInBtn">Sign in with Google</button>
+    <div class="landing-note">Provizas International internal use only.</div>
+  </div>
+</div>
+
+<header class="top" id="appHeader" hidden>
   <div class="header-left">
     <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" title="Toggle menu">☰</button>
-    <img class="brandmark" src="/assets/lockup-reverse.png" alt="Provizas" onerror="this.style.display='none'">
+    <img class="brandmark" src="/assets/symbol-reverse.png" alt="Provizas" onerror="this.style.display='none'">
     <h1 class="apptitle">Provizas Hub</h1>
   </div>
   <div class="header-right">
@@ -425,7 +456,7 @@
   </div>
 </header>
 
-<div class="app-body">
+<div class="app-body" id="appBody" hidden>
   <nav class="app-nav" id="appNav">
     <button class="app-nav-item active" data-section="financial">
       <span class="app-nav-glyph">▤</span><span class="app-nav-label">Financial Transactions</span>
@@ -1962,25 +1993,33 @@
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdod3NwZ3ljemtncXFydnVoaXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMjUwMDEsImV4cCI6MjEwMzgwMTAwMX0.038JEJJCxTIrpxB_cv0rL_pL5dX9w_jCiGxe5VEFO_o';
   const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
+  function signInWithGoogle(){
+    sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href } });
+  }
+  // The header is only ever visible once signed in (see renderAuthGate), so
+  // this just needs to show who's signed in + a sign-out control.
   function renderUserArea(){
     const wrap = el('userArea');
-    if(!sb){ wrap.innerHTML = ''; return; }
-    if(state.session && state.session.user){
-      wrap.innerHTML = `<span class="user-email">${escHtml(state.session.user.email||'')}</span><button class="signout-btn" id="signOutBtn">Sign out</button>`;
-      el('signOutBtn').addEventListener('click', async ()=>{ await sb.auth.signOut(); });
-    } else {
-      wrap.innerHTML = `<button class="signin-btn" id="signInBtn">Sign in with Google</button>`;
-      el('signInBtn').addEventListener('click', ()=>{
-        sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href } });
-      });
-    }
+    if(!sb || !state.session || !state.session.user){ wrap.innerHTML = ''; return; }
+    wrap.innerHTML = `<span class="user-email">${escHtml(state.session.user.email||'')}</span><button class="signout-btn" id="signOutBtn">Sign out</button>`;
+    el('signOutBtn').addEventListener('click', async ()=>{ await sb.auth.signOut(); });
+  }
+  // Nothing about the app itself — menu, content, even the header — shows
+  // until signed in; signed-out visitors only ever see the landing page.
+  function renderAuthGate(){
+    const signedIn = !!(sb && state.session && state.session.user);
+    el('landingPage').hidden = signedIn;
+    el('appHeader').hidden = !signedIn;
+    el('appBody').hidden = !signedIn;
   }
   async function initAuth(){
-    if(!sb) return;
+    el('landingSignInBtn').addEventListener('click', ()=>{ if(sb) signInWithGoogle(); });
+    if(!sb){ renderAuthGate(); return; }
     const { data } = await sb.auth.getSession();
     state.session = data.session;
     renderUserArea();
-    sb.auth.onAuthStateChange((event, session)=>{ state.session = session; renderUserArea(); });
+    renderAuthGate();
+    sb.auth.onAuthStateChange((event, session)=>{ state.session = session; renderUserArea(); renderAuthGate(); });
   }
 
   // ---------- init ----------
