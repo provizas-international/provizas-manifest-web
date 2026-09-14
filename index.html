@@ -597,7 +597,15 @@
   todayLabel.textContent = new Date().toLocaleDateString(undefined,{weekday:'short', year:'numeric', month:'short', day:'numeric'});
 
   async function api(path, opts){
-    const resp = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opts||{}));
+    opts = opts || {};
+    // Every route now requires a signed-in @provizas.com session — see
+    // getAuthorizedUser() on the backend. Without this header every call
+    // gets a 401, even from inside the app itself.
+    const headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
+    if(state.session && state.session.access_token){
+      headers['Authorization'] = `Bearer ${state.session.access_token}`;
+    }
+    const resp = await fetch(path, Object.assign({}, opts, {headers}));
     const data = await resp.json().catch(()=>({}));
     if(!resp.ok){
       const err = new Error(data.error || `Request failed (${resp.status})`);
@@ -2012,6 +2020,20 @@
     el('appHeader').hidden = !signedIn;
     el('appBody').hidden = !signedIn;
   }
+  // All app data is behind a signed-in session on the backend now (see
+  // getAuthorizedUser() there) — only fetch it once we actually know the
+  // user is signed in, both to avoid a burst of guaranteed-401s on load for
+  // a signed-out visitor, and to avoid a race where these fire before
+  // state.session (needed by api()'s Authorization header) is set.
+  async function loadAppData(){
+    await refreshUsers();
+    await refreshHistory();
+    await refreshContactsFromCache();
+    await refreshTracking();
+    await refreshItems();
+    await refreshBankAccounts();
+  }
+
   async function initAuth(){
     el('landingSignInBtn').addEventListener('click', ()=>{ if(sb) signInWithGoogle(); });
     if(!sb){ renderAuthGate(); return; }
@@ -2019,19 +2041,21 @@
     state.session = data.session;
     renderUserArea();
     renderAuthGate();
-    sb.auth.onAuthStateChange((event, session)=>{ state.session = session; renderUserArea(); renderAuthGate(); });
+    if(state.session && state.session.user) await loadAppData();
+    sb.auth.onAuthStateChange((event, session)=>{
+      const wasSignedIn = !!(state.session && state.session.user);
+      state.session = session;
+      renderUserArea();
+      renderAuthGate();
+      const isSignedIn = !!(state.session && state.session.user);
+      if(isSignedIn && !wasSignedIn) loadAppData();
+    });
   }
 
   // ---------- init ----------
   (async function init(){
     initAppNav();
-    initAuth();
-    await refreshUsers();
-    await refreshHistory();
-    await refreshContactsFromCache();
-    await refreshTracking();
-    await refreshItems();
-    await refreshBankAccounts();
+    await initAuth();
   })();
 })();
 </script>
