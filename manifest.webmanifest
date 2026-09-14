@@ -1,7 +1,7 @@
 {
-  "name": "Manifest — Provizas",
-  "short_name": "Manifest",
-  "description": "Document intake for Xero — bills, invoices, and expenses.",
+  "name": "Provizas Hub",
+  "short_name": "Provizas Hub",
+  "description": "Financial transactions, order management, documents, and shipments for Provizas International.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

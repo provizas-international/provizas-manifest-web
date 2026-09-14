@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Manifest — Provizas</title>
+<title>Provizas Hub</title>
 <link rel="icon" type="image/png" href="/assets/symbol.png">
 <!-- Add to Home Screen support: launches full-screen with the app icon,
      instead of opening as a regular browser tab/bookmark. -->
@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/assets/symbol.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Manifest">
+<meta name="apple-mobile-web-app-title" content="Provizas Hub">
 <meta name="theme-color" content="#28285F">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -71,31 +71,69 @@
   /* ---------- header ---------- */
   header.top{
     background:var(--navy);
-    padding:14px 24px;
+    padding:12px 20px;
     display:flex;
     align-items:center;
     justify-content:space-between;
     flex-wrap:wrap;
     gap:10px;
   }
-  header.top .brandmark{height:30px;display:block;}
+  header.top .header-left{display:flex;align-items:center;gap:14px;}
+  header.top .header-right{display:flex;align-items:center;gap:16px;}
+  header.top .brandmark{height:28px;display:block;}
   header.top .apptitle{
     color:var(--white);
-    font-family:var(--font-body);
-    font-size:13px;
-    letter-spacing:0.02em;
-    opacity:0.75;
+    font-family:var(--font-head);
+    font-size:16px;
+    font-weight:700;
+    letter-spacing:0.01em;
   }
   header.top .today{
     color:var(--white);
     font-size:12px;
     opacity:0.6;
   }
+  .nav-toggle{
+    background:none;border:1px solid rgba(255,255,255,0.25);color:var(--white);
+    border-radius:6px;width:32px;height:32px;font-size:15px;cursor:pointer;flex:none;
+  }
+  .nav-toggle:hover{background:rgba(255,255,255,0.1);}
+  .user-area{color:var(--white);font-size:12.5px;display:flex;align-items:center;gap:10px;}
+  .user-area .signin-btn, .user-area .signout-btn{
+    background:none;border:1px solid rgba(255,255,255,0.35);color:var(--white);
+    border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:700;
+  }
+  .user-area .signin-btn:hover, .user-area .signout-btn:hover{background:rgba(255,255,255,0.12);}
+  .user-area .user-email{opacity:0.85;}
+
+  /* ---------- app shell: left nav + content ---------- */
+  .app-body{display:flex;align-items:stretch;min-height:calc(100vh - 56px);}
+  .app-nav{
+    width:210px;flex:none;background:var(--white);border-right:1px solid var(--line);
+    padding:14px 10px;display:flex;flex-direction:column;gap:2px;transition:width 0.15s ease;
+  }
+  .app-nav.collapsed{width:56px;padding:14px 6px;}
+  .app-nav-item{
+    display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;
+    background:none;border:none;text-align:left;font-size:13.5px;font-weight:600;
+    color:var(--text-secondary);cursor:pointer;white-space:nowrap;overflow:hidden;
+  }
+  .app-nav-item:hover{background:var(--light-gray);color:var(--text-primary);}
+  .app-nav-item.active{background:var(--orange-soft);color:var(--orange);}
+  .app-nav-glyph{font-size:16px;flex:none;width:20px;text-align:center;}
+  .app-nav.collapsed .app-nav-label{display:none;}
+  .app-content{flex:1;min-width:0;}
+  .app-section[hidden]{display:none;}
+  .coming-soon{padding:60px 20px;text-align:center;color:var(--text-secondary);}
+  .coming-soon .glyph{font-size:32px;color:var(--line);margin-bottom:12px;}
+  .coming-soon .lead{font-family:var(--font-head);font-weight:700;font-size:18px;color:var(--text-primary);margin-bottom:6px;}
+  .coming-soon .fine{font-size:13px;max-width:420px;margin:0 auto;}
 
   .shell{max-width:1180px;margin:0 auto;padding:28px 20px 64px;}
 
   .layout{display:grid;grid-template-columns:300px 1fr;gap:22px;align-items:start;}
   @media (max-width:860px){.layout{grid-template-columns:1fr;}}
+  @media (max-width:640px){.app-nav{position:fixed;left:0;top:56px;bottom:0;z-index:50;box-shadow:2px 0 12px rgba(0,0,0,0.15);}}
 
   .panel{background:var(--white);border:1px solid var(--line);}
   .panel-head{
@@ -370,16 +408,42 @@
      cropped out of it as a standalone image — see cropBatchAttachment(). -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>if(window['pdfjsLib']) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+<!-- Google Sign-In for Provizas internal users, via Supabase Auth. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 </head>
 <body>
 
 <header class="top">
-  <img class="brandmark" src="/assets/lockup-reverse.png" alt="Provizas" onerror="this.style.display='none'">
-  <h1 class="apptitle">Manifest — document intake for Xero</h1>
-  <div class="today" id="todayLabel"></div>
+  <div class="header-left">
+    <button class="nav-toggle" id="navToggle" aria-label="Toggle menu" title="Toggle menu">☰</button>
+    <img class="brandmark" src="/assets/lockup-reverse.png" alt="Provizas" onerror="this.style.display='none'">
+    <h1 class="apptitle">Provizas Hub</h1>
+  </div>
+  <div class="header-right">
+    <div class="today" id="todayLabel"></div>
+    <div class="user-area" id="userArea"></div>
+  </div>
 </header>
 
-<div class="shell">
+<div class="app-body">
+  <nav class="app-nav" id="appNav">
+    <button class="app-nav-item active" data-section="financial">
+      <span class="app-nav-glyph">▤</span><span class="app-nav-label">Financial Transactions</span>
+    </button>
+    <button class="app-nav-item" data-section="orders">
+      <span class="app-nav-glyph">▥</span><span class="app-nav-label">Order Management</span>
+    </button>
+    <button class="app-nav-item" data-section="documents">
+      <span class="app-nav-glyph">▦</span><span class="app-nav-label">Documents</span>
+    </button>
+    <button class="app-nav-item" data-section="shipments">
+      <span class="app-nav-glyph">▧</span><span class="app-nav-label">Shipments</span>
+    </button>
+  </nav>
+
+  <div class="app-content">
+  <section class="app-section" id="section-financial">
+  <div class="shell">
   <div class="layout">
     <!-- INTAKE RAIL -->
     <div class="panel">
@@ -438,6 +502,33 @@
       <div id="historyBody"><div class="hist-empty">Nothing submitted yet</div></div>
     </div>
   </div>
+  </div>
+  </section>
+
+  <section class="app-section" id="section-orders" hidden>
+    <div class="shell"><div class="coming-soon">
+      <div class="glyph">▥</div>
+      <div class="lead">Order Management</div>
+      <div class="fine">Coming soon — create and review Order Confirmations (OC).</div>
+    </div></div>
+  </section>
+
+  <section class="app-section" id="section-documents" hidden>
+    <div class="shell"><div class="coming-soon">
+      <div class="glyph">▦</div>
+      <div class="lead">Documents</div>
+      <div class="fine">Coming soon — generate Shipping Instructions from an OC, and review HBL/HBL second leg/COO drafts against it.</div>
+    </div></div>
+  </section>
+
+  <section class="app-section" id="section-shipments" hidden>
+    <div class="shell"><div class="coming-soon">
+      <div class="glyph">▧</div>
+      <div class="lead">Shipments</div>
+      <div class="fine">Coming soon — an operations dashboard sourced from Airtable.</div>
+    </div></div>
+  </section>
+  </div>
 </div>
 
 <div id="sourceModalRoot"></div>
@@ -455,6 +546,7 @@
     batch: null,
     focusedBatchIndex: null,
     sourceModal: null, // {fileIndex, zoom} while the "View source" modal is open
+    session: null, // Supabase Auth session, once Google Sign-In is configured
     submitter: null,
     contacts: [],
     contactsSyncedAt: null,
@@ -1841,8 +1933,60 @@
   function escHtml(s){ return String(s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
   function escAttr(s){ return String(s||'').replace(/"/g,'&quot;'); }
 
+  // ---------- app shell: collapsible left nav ----------
+  function initAppNav(){
+    const nav = el('appNav');
+    const toggle = el('navToggle');
+    let wasCollapsed = false;
+    try{ wasCollapsed = localStorage.getItem('appNavCollapsed') === '1'; }catch(err){}
+    if(wasCollapsed) nav.classList.add('collapsed');
+    toggle.addEventListener('click', ()=>{
+      nav.classList.toggle('collapsed');
+      try{ localStorage.setItem('appNavCollapsed', nav.classList.contains('collapsed') ? '1' : '0'); }catch(err){}
+    });
+    nav.querySelectorAll('.app-nav-item').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const target = btn.dataset.section;
+        nav.querySelectorAll('.app-nav-item').forEach(b=>b.classList.toggle('active', b===btn));
+        document.querySelectorAll('.app-section').forEach(sec=>{ sec.hidden = sec.id !== `section-${target}`; });
+      });
+    });
+  }
+
+  // ---------- Google Sign-In (Supabase Auth) ----------
+  // Only wired up for Provizas internal users — Supabase's Google provider
+  // needs a Google OAuth client configured on the Supabase project before
+  // this actually completes a sign-in (a one-time setup step outside the
+  // app itself); until then the button will show Supabase's own error.
+  const SUPABASE_URL = 'https://ghwspgyczkgqqrvuhism.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdod3NwZ3ljemtncXFydnVoaXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMjUwMDEsImV4cCI6MjEwMzgwMTAwMX0.038JEJJCxTIrpxB_cv0rL_pL5dX9w_jCiGxe5VEFO_o';
+  const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+  function renderUserArea(){
+    const wrap = el('userArea');
+    if(!sb){ wrap.innerHTML = ''; return; }
+    if(state.session && state.session.user){
+      wrap.innerHTML = `<span class="user-email">${escHtml(state.session.user.email||'')}</span><button class="signout-btn" id="signOutBtn">Sign out</button>`;
+      el('signOutBtn').addEventListener('click', async ()=>{ await sb.auth.signOut(); });
+    } else {
+      wrap.innerHTML = `<button class="signin-btn" id="signInBtn">Sign in with Google</button>`;
+      el('signInBtn').addEventListener('click', ()=>{
+        sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href } });
+      });
+    }
+  }
+  async function initAuth(){
+    if(!sb) return;
+    const { data } = await sb.auth.getSession();
+    state.session = data.session;
+    renderUserArea();
+    sb.auth.onAuthStateChange((event, session)=>{ state.session = session; renderUserArea(); });
+  }
+
   // ---------- init ----------
   (async function init(){
+    initAppNav();
+    initAuth();
     await refreshUsers();
     await refreshHistory();
     await refreshContactsFromCache();
