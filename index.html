@@ -2002,7 +2002,13 @@
   const sb = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
   function signInWithGoogle(){
-    sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href } });
+    // A clean, canonical URL — not window.location.href, which can still
+    // carry a stale #access_token=... fragment left over from a previous
+    // sign-in (sign-out never navigates, so the URL bar keeps whatever
+    // hash the last OAuth redirect left in it). A second sign-in inheriting
+    // that as its own redirectTo is exactly what broke this before.
+    const cleanUrl = window.location.origin + window.location.pathname;
+    sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: cleanUrl } });
   }
   // The header is only ever visible once signed in (see renderAuthGate), so
   // this just needs to show who's signed in + a sign-out control.
@@ -2041,6 +2047,13 @@
     state.session = data.session;
     renderUserArea();
     renderAuthGate();
+    // Belt-and-suspenders on top of the clean redirectTo above: strip any
+    // #access_token=... (or ?code=...) the OAuth redirect left in the URL
+    // once it's been processed, so it's never sitting there to be picked
+    // up as the redirectTo for a later sign-in attempt.
+    if((window.location.hash && window.location.hash.includes('access_token')) || window.location.search.includes('code=')){
+      history.replaceState(null, '', window.location.origin + window.location.pathname);
+    }
     if(state.session && state.session.user) await loadAppData();
     sb.auth.onAuthStateChange((event, session)=>{
       const wasSignedIn = !!(state.session && state.session.user);
